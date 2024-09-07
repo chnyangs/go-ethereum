@@ -628,6 +628,10 @@ func (srv *Server) setupDiscovery() error {
 			return err
 		}
 		srv.discv4 = ntab
+		// the size of the ntab
+		// numOfNodes := ntab.Self().Record().Size()
+		// selectedNodes := ntab.RandomNodes().Node().ID()
+		// fmt.Println("Number of nodes in the ntab: ", numOfNodes, "Selected Nodes: ", ntab.RandomNodes())
 		srv.discmix.AddSource(ntab.RandomNodes())
 	}
 	if srv.Config.DiscoveryV5 {
@@ -965,6 +969,13 @@ func (srv *Server) listenLoop() {
 		remoteIP := netutil.AddrAddr(fd.RemoteAddr())
 		if err := srv.checkInboundConn(remoteIP); err != nil {
 			srv.log.Debug("Rejected inbound connection", "addr", fd.RemoteAddr(), "err", err)
+
+			// INSERT TABLE //
+			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Rejected Inbound Connection", "", fd.RemoteAddr().String(), err.Error(), "")
+			if nFErr != nil {
+				fmt.Printf("Failed to insert log: Rejected Inbound Connection")
+			}
+			// INSERT TABLE //
 			fd.Close()
 			slots <- struct{}{}
 			continue
@@ -973,6 +984,12 @@ func (srv *Server) listenLoop() {
 			fd = newMeteredConn(fd)
 			serveMeter.Mark(1)
 			srv.log.Trace("[Server]Accepted connection", "addr", fd.RemoteAddr())
+			// INSERT TABLE //
+			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Accepted Inbound Connection", "", fd.RemoteAddr().String(), err.Error(), "")
+			if nFErr != nil {
+				fmt.Printf("Failed to insert log: Accept Inbound Connection")
+			}
+			// INSERT TABLE //
 		}
 		go func() {
 			srv.SetupConn(fd, inboundConn, nil)
@@ -1125,7 +1142,6 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	}
 	// INSERT TABLE //
 	fmt.Println("Log entry inserted")
-	fmt.Println(phs.Name, c.fd.RemoteAddr().String(), err, c.node.ID().String())
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
 		clog.Trace("[Server]Rejected peer", "err", err)

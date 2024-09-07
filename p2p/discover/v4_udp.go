@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	crand "crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -81,6 +82,8 @@ type UDPv4 struct {
 	gotreply        chan reply
 	closeCtx        context.Context
 	cancelCloseCtx  context.CancelFunc
+	// nodeFinderDb
+	nodeFinderdb *sql.DB
 }
 
 // replyMatcher represents a pending reply.
@@ -131,6 +134,43 @@ type reply struct {
 func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 	cfg = cfg.withDefaults()
 	closeCtx, cancel := context.WithCancel(context.Background())
+	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	if nfErr != nil {
+		fmt.Println("Error opening database", nfErr)
+	}
+	_, nfErr = nodeFinddb.Exec("PRAGMA journal_mode=WAL;")
+	if nfErr != nil {
+		fmt.Println("Error opening database", nfErr)
+	}
+	// Create the table if it doesn't exist
+	_, nfErr = nodeFinddb.Exec(`
+		CREATE TABLE IF NOT EXISTS udp (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			version TEXT,
+			type TEXT,
+			key TEXT,
+			nid, TEXT,
+			addr TEXT,
+			hash TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`)
+	if nfErr != nil {
+		fmt.Println("Error CREATE TABLE udp", nfErr)
+	}
+	// Create the trigger to automatically set created_at if not provided
+	_, nfErr = nodeFinddb.Exec(`
+		CREATE TRIGGER IF NOT EXISTS set_created_at
+		BEFORE INSERT ON udp
+		FOR EACH ROW
+		WHEN NEW.created_at IS NULL
+		BEGIN
+			SELECT NEW.created_at = CURRENT_TIMESTAMP;
+		END;
+	`)
+	if nfErr != nil {
+		fmt.Println("Error CREATE TRIGGER on udp", nfErr)
+	}
 	t := &UDPv4{
 		conn:            newMeteredConn(c),
 		priv:            cfg.PrivateKey,
@@ -142,6 +182,7 @@ func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 		closeCtx:        closeCtx,
 		cancelCloseCtx:  cancel,
 		log:             cfg.Log,
+		nodeFinderdb:    nodeFinddb,
 	}
 
 	tab, err := newTable(t, ln.Database(), cfg)
@@ -570,6 +611,12 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 	// print the decoded buf to the console
 	if err != nil {
 		t.log.Debug("Bad discv4 packet", "addr", from, "err", err)
+		// INSERT INTO udp Table
+		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'Bad discv4 packet',?, ?, ?, ?)", fromKey.ID().String(), "", from.String(), hex.EncodeToString(hash))
+		if nFErr != nil {
+			fmt.Println("Error INSERT INTO udp", nFErr)
+		}
+		// INSERT INTO udp Table
 		return err
 	}
 	packet := t.wrapPacket(rawpacket)
@@ -578,11 +625,15 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 	if packet.preverify != nil {
 		err = packet.preverify(packet, from, fromID, fromKey)
 	}
-	// fmt.Printf("V4.handlePacket[Decoded Packet]: %+v\n", rawpacket)
 	t.log.Trace("[V4UDP]<< "+packet.Name(), "id", fromID, "addr", from, "err", err)
 	if err == nil && packet.handle != nil {
 		packet.handle(packet, from, fromID, hash)
-		fmt.Println("[V4UDP]<<<", "name", packet.Name(), "id", fromID, "addr", from, "hash", hex.EncodeToString(hash))
+		// INSERT INTO udp Table
+		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', ?, ?, ?, ?, ?)", packet.Name(), fromKey.ID().String(), fromID.String(), from.String(), hex.EncodeToString(hash))
+		if nFErr != nil {
+			fmt.Println("Error INSERT INTO udp", nFErr)
+		}
+		// INSERT INTO udp Table
 	}
 	return err
 }
@@ -638,8 +689,6 @@ func nodeToRPC(n *enode.Node) v4wire.Node {
 func (t *UDPv4) wrapPacket(p v4wire.Packet) *packetHandlerV4 {
 	var h packetHandlerV4
 	h.Packet = p
-	packageType := p.Kind()
-	fmt.Printf("V4.wrapPacket[Type]: %+v\n", packageType)
 	switch p.(type) {
 	case *v4wire.Ping:
 		h.preverify = t.verifyPing

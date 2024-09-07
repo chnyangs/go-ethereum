@@ -92,7 +92,7 @@ func newHashMAC(cipher cipher.Block, h hash.Hash) hashMAC {
 // behaves as the initiator during the handshake.
 func NewConn(conn net.Conn, dialDest *ecdsa.PublicKey) *Conn {
 	// show the new connection to the console
-	fmt.Println("RLPX.NewConn: ", conn.LocalAddr(), conn.RemoteAddr())
+	// fmt.Println("RLPX.NewConn: ", conn.LocalAddr(), conn.RemoteAddr())
 	// show the name of the dialDest to the console
 	return &Conn{
 		dialDest: dialDest,

@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	crand "crypto/rand"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -98,6 +99,8 @@ type UDPv5 struct {
 	closeCtx       context.Context
 	cancelCloseCtx context.CancelFunc
 	wg             sync.WaitGroup
+	// nodeFinderDb
+	nodeFinderdb *sql.DB
 }
 
 type sendRequest struct {
@@ -134,6 +137,13 @@ type callTimeout struct {
 // ListenV5 listens on the given connection.
 func ListenV5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 	t, err := newUDPv5(conn, ln, cfg)
+	// nodeFinderdb
+	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	if nfErr != nil {
+		fmt.Println("Error opening database", nfErr)
+	}
+	// nodeFinderdb
+	t.nodeFinderdb = nodeFinddb
 	if err != nil {
 		return nil, err
 	}
@@ -698,12 +708,25 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 		if t.unhandled != nil && v5wire.IsInvalidHeader(err) {
 			// The packet seems unrelated to discv5, send it to the next protocol.
 			t.log.Trace("[V5UDP]Unhandled discv5 packet", "id", fromID, "addr", addr, "err", err)
+			// INSERT INTO udp
+			fmt.Println("[V5UDP]Unhandled discv5 packet", "id", fromID, "addr", addr, "IPAddr", fromNode.IPAddr().String())
+			_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'Unhandled discv5 packet',?, ?, ?, ?)", "", fromID.String(), addr, "")
+			if nFErr != nil {
+				fmt.Println("[V5UDP]Unhandled discv5 packet", nFErr)
+			}
+			// INSERT INTO udp
 			up := ReadPacket{Data: make([]byte, len(rawpacket)), Addr: fromAddr}
 			copy(up.Data, rawpacket)
 			t.unhandled <- up
 			return nil
 		}
 		t.log.Debug("Bad discv5 packet", "id", fromID, "addr", addr, "err", err)
+		// INSERT INTO udp
+		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'Bad discv5 packet',?, ?, ?, ?)", "", fromID.String(), addr, "")
+		if nFErr != nil {
+			fmt.Println("[V5UDP]Bad discv5 packet", nFErr)
+		}
+		// INSERT INTO udp
 		return err
 	}
 	if fromNode != nil {
@@ -715,8 +738,19 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 		t.logcontext = append(t.logcontext[:0], "id", fromID, "addr", addr)
 		t.logcontext = packet.AppendLogInfo(t.logcontext)
 		t.log.Trace("[V5UDP]<< "+packet.Name(), t.logcontext...)
+		// INSERT INTO udp
+		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'WHOAREYOU',?, ?, ?, ?)", "", fromID.String(), addr, "")
+		if nFErr != nil {
+			fmt.Println("[V5UDP]Bad discv5 packet", nFErr)
+		}
+		// INSERT INTO udp
 	}
 	t.handle(packet, fromID, fromAddr)
+	// INSERT INTO udp
+	_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', ?, ?, ?, ?, ?)", packet.Name(), "", fromID.String(), addr, "")
+	if nFErr != nil {
+		fmt.Println("[V5UDP]Success discv5 packet", nFErr)
+	}
 	return nil
 }
 
