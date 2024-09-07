@@ -1141,7 +1141,6 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		fmt.Printf("Failed to insert log: P2P Handshake Success\n")
 	}
 	// INSERT TABLE //
-	fmt.Println("Log entry inserted")
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
 		clog.Trace("[Server]Rejected peer", "err", err)

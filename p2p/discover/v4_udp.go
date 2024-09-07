@@ -369,7 +369,18 @@ func (t *UDPv4) findnode(toid enode.ID, toAddrPort netip.AddrPort, target v4wire
 			n, err := t.nodeFromRPC(toAddrPort, rn)
 			if err != nil {
 				t.log.Trace("[V4UDP]Invalid neighbor node received", "ip", rn.IP, "addr", toAddrPort, "err", err)
+				// INSERT INTO udp Table
+				_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Invalid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
+				if nFErr != nil {
+					fmt.Println("Error INSERT INTO udp", nFErr)
+				}
+				// INSERT INTO udp Table
 				continue
+			}
+			// INSERT INTO udp Table
+			_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Valid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
+			if nFErr != nil {
+				fmt.Println("Error INSERT INTO udp", nFErr)
 			}
 			nodes = append(nodes, n)
 		}
@@ -816,7 +827,7 @@ func (t *UDPv4) handleFindnode(h *packetHandlerV4, from netip.AddrPort, fromID e
 	var sent bool
 	for _, n := range closest {
 		// show the node in the console
-		fmt.Printf("V4.handleFindnode[Node]: %+v\n", n.IPAddr())
+		// fmt.Printf("V4.handleFindnode[Node]: %+v\n", n.IPAddr())
 		if netutil.CheckRelayAddr(from.Addr(), n.IPAddr()) == nil {
 			p.Nodes = append(p.Nodes, nodeToRPC(n))
 		}
