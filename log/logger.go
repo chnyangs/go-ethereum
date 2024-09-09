@@ -18,7 +18,6 @@ const (
 	legacyLevelInfo
 	legacyLevelDebug
 	legacyLevelTrace
-	lagacyLevelNodeFinder
 )
 
 const (
@@ -29,12 +28,11 @@ const (
 	LevelWarn                    = slog.LevelWarn
 	LevelError                   = slog.LevelError
 	LevelCrit         slog.Level = 12
-	LevelNodeFinder   slog.Level = -9
+
 	// for backward-compatibility
-	LvlTrace      = LevelTrace
-	LvlInfo       = LevelInfo
-	LvlDebug      = LevelDebug
-	LvlNodeFinder = LevelNodeFinder
+	LvlTrace = LevelTrace
+	LvlInfo  = LevelInfo
+	LvlDebug = LevelDebug
 )
 
 // FromLegacyLevel converts from old Geth verbosity level constants
@@ -53,8 +51,6 @@ func FromLegacyLevel(lvl int) slog.Level {
 		return slog.LevelDebug
 	case legacyLevelTrace:
 		return LevelTrace
-	case lagacyLevelNodeFinder:
-		return LevelNodeFinder
 	default:
 		break
 	}
@@ -81,8 +77,6 @@ func LevelAlignedString(l slog.Level) string {
 		return "ERROR"
 	case LevelCrit:
 		return "CRIT "
-	case LevelNodeFinder:
-		return "NODEFIND "
 	default:
 		return "unknown level"
 	}
@@ -103,8 +97,6 @@ func LevelString(l slog.Level) string {
 		return "error"
 	case LevelCrit:
 		return "crit"
-	case LevelNodeFinder:
-		return "nodefinder"
 	default:
 		return "unknown"
 	}
@@ -147,9 +139,6 @@ type Logger interface {
 
 	// Handler returns the underlying handler of the inner logger.
 	Handler() slog.Handler
-
-	// NodeFinder returns the node finder of the inner logger.
-	NodeFinder(msg string, ctx ...interface{})
 }
 
 type logger struct {
@@ -224,8 +213,4 @@ func (l *logger) Error(msg string, ctx ...interface{}) {
 func (l *logger) Crit(msg string, ctx ...interface{}) {
 	l.Write(LevelCrit, msg, ctx...)
 	os.Exit(1)
-}
-
-func (l *logger) NodeFinder(msg string, ctx ...interface{}) {
-	l.Write(LevelNodeFinder, msg, ctx...)
 }

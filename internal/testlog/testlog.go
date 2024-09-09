@@ -43,16 +43,6 @@ type logger struct {
 	h  *bufHandler
 }
 
-// NodeFinder implements log.Logger.
-func (l *logger) NodeFinder(msg string, ctx ...interface{}) {
-	panic("unimplemented")
-}
-
-// WriteToDB implements log.Logger.
-func (l *logger) WriteToDB(level slog.Level, statement string, stage string, msg string, ctx ...interface{}) {
-	panic("unimplemented")
-}
-
 type bufHandler struct {
 	buf   []slog.Record
 	attrs []slog.Attr

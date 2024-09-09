@@ -288,7 +288,7 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	} else {
 		logger = log.New("peer", id[:8])
 	}
-	logger.Trace("[Downloader]Unregistering sync peer")
+	logger.Trace("Unregistering sync peer")
 	if err := d.peers.Unregister(id); err != nil {
 		logger.Error("Failed to unregister sync peer", "err", err)
 		return err
