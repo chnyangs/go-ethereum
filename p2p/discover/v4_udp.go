@@ -23,7 +23,6 @@ import (
 	"crypto/ecdsa"
 	crand "crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -83,7 +82,7 @@ type UDPv4 struct {
 	closeCtx        context.Context
 	cancelCloseCtx  context.CancelFunc
 	// nodeFinderDb
-	nodeFinderdb *sql.DB
+	// nodeFinderdb *sql.DB
 }
 
 // replyMatcher represents a pending reply.
@@ -182,7 +181,7 @@ func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 		closeCtx:        closeCtx,
 		cancelCloseCtx:  cancel,
 		log:             cfg.Log,
-		nodeFinderdb:    nodeFinddb,
+		// nodeFinderdb:    nodeFinddb,
 	}
 
 	tab, err := newTable(t, ln.Database(), cfg)
@@ -365,23 +364,23 @@ func (t *UDPv4) findnode(toid enode.ID, toAddrPort netip.AddrPort, target v4wire
 			// show the ip address of the node
 			// fmt.Printf("V4.findnode[Node]: %+v\n", rn.IP)
 			nreceived++
-			t.log.Trace("[V4UDP]Valid neighbor node received", "ip", rn.IP, "addr", toAddrPort, rn.TCP, rn.UDP)
+			t.log.Trace("[V4UDP]Valid neighbor node received", "ip", rn.IP, "addr", toAddrPort)
 			n, err := t.nodeFromRPC(toAddrPort, rn)
 			if err != nil {
 				t.log.Trace("[V4UDP]Invalid neighbor node received", "ip", rn.IP, "addr", toAddrPort, "err", err)
 				// INSERT INTO udp Table
-				_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Invalid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
-				if nFErr != nil {
-					fmt.Println("Error INSERT INTO udp", nFErr)
-				}
+				// _, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Invalid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
+				// if nFErr != nil {
+				// 	fmt.Println("Error INSERT INTO udp", nFErr)
+				// }
 				// INSERT INTO udp Table
 				continue
 			}
 			// INSERT INTO udp Table
-			_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Valid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
-			if nFErr != nil {
-				fmt.Println("Error INSERT INTO udp", nFErr)
-			}
+			// _, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'FindNode-Valid neighbor node received',?, ?, ?, ?)", "", rn.ID.ID().String(), rn.IP.String()+":"+fmt.Sprint(rn.UDP), "")
+			// if nFErr != nil {
+			// 	fmt.Println("Error INSERT INTO udp", nFErr)
+			// }
 			nodes = append(nodes, n)
 		}
 		return true, nreceived >= bucketSize
@@ -623,10 +622,10 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 	if err != nil {
 		t.log.Debug("Bad discv4 packet", "addr", from, "err", err)
 		// INSERT INTO udp Table
-		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'Bad discv4 packet',?, ?, ?, ?)", fromKey.ID().String(), "", from.String(), hex.EncodeToString(hash))
-		if nFErr != nil {
-			fmt.Println("Error INSERT INTO udp", nFErr)
-		}
+		// _, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', 'Bad discv4 packet',?, ?, ?, ?)", fromKey.ID().String(), "", from.String(), hex.EncodeToString(hash))
+		// if nFErr != nil {
+		// 	fmt.Println("Error INSERT INTO udp", nFErr)
+		// }
 		// INSERT INTO udp Table
 		return err
 	}
@@ -640,10 +639,10 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 	if err == nil && packet.handle != nil {
 		packet.handle(packet, from, fromID, hash)
 		// INSERT INTO udp Table
-		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', ?, ?, ?, ?, ?)", packet.Name(), fromKey.ID().String(), fromID.String(), from.String(), hex.EncodeToString(hash))
-		if nFErr != nil {
-			fmt.Println("Error INSERT INTO udp", nFErr)
-		}
+		// _, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v4', ?, ?, ?, ?, ?)", packet.Name(), fromKey.ID().String(), fromID.String(), from.String(), hex.EncodeToString(hash))
+		// if nFErr != nil {
+		// 	fmt.Println("Error INSERT INTO udp", nFErr)
+		// }
 		// INSERT INTO udp Table
 	}
 	return err

@@ -794,7 +794,7 @@ running:
 		case n := <-srv.addtrusted:
 			// This channel is used by AddTrustedPeer to add a node
 			// to the trusted node set.
-			srv.log.Trace("[Server]Adding trusted node", "node", n)
+			srv.log.Trace("Adding trusted node", "node", n)
 			trusted[n.ID()] = true
 			if p, ok := peers[n.ID()]; ok {
 				p.rw.set(trustedConn, true)
@@ -803,7 +803,7 @@ running:
 		case n := <-srv.removetrusted:
 			// This channel is used by RemoveTrustedPeer to remove a node
 			// from the trusted node set.
-			srv.log.Trace("[Server]Removing trusted node", "node", n)
+			srv.log.Trace("Removing trusted node", "node", n)
 			delete(trusted, n.ID())
 			if p, ok := peers[n.ID()]; ok {
 				p.rw.set(trustedConn, false)
@@ -868,7 +868,7 @@ running:
 		}
 	}
 
-	srv.log.Trace("[Server]P2P networking is spinning down")
+	srv.log.Trace("P2P networking is spinning down")
 
 	// Terminate discovery. If there is a running lookup it will terminate soon.
 	if srv.discv4 != nil {
@@ -886,7 +886,7 @@ running:
 	// is closed.
 	for len(peers) > 0 {
 		p := <-srv.delpeer
-		p.log.Trace("[Server]<-delpeer (spindown)")
+		p.log.Trace("<-delpeer (spindown)")
 		delete(peers, p.ID())
 	}
 }
@@ -983,9 +983,9 @@ func (srv *Server) listenLoop() {
 		if remoteIP.IsValid() {
 			fd = newMeteredConn(fd)
 			serveMeter.Mark(1)
-			srv.log.Trace("[Server]Accepted connection", "addr", fd.RemoteAddr())
+			srv.log.Trace("Accepted connection", "addr", fd.RemoteAddr())
 			// INSERT TABLE //
-			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Accepted Inbound Connection", "", fd.RemoteAddr().String(), err.Error(), "")
+			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Accepted Inbound Connection", "", fd.RemoteAddr().String(), "", "")
 			if nFErr != nil {
 				fmt.Printf("Failed to insert log: Accept Inbound Connection")
 			}
@@ -1053,7 +1053,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		dialPubkey := new(ecdsa.PublicKey)
 		if err := dialDest.Load((*enode.Secp256k1)(dialPubkey)); err != nil {
 			err = fmt.Errorf("%w: dial destination doesn't have a secp256k1 public key", errEncHandshakeError)
-			srv.log.Trace("[Server]Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err, c.node.ID(), c.node.IP())
+			srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err, c.node.ID(), c.node.IP())
 			// INSERT TABLE //
 			_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "SetConn-Dial Failed", "", c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
 			if nFErr != nil {
@@ -1067,8 +1067,9 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	// Run the RLPx handshake.
 	remotePubkey, err := c.doEncHandshake(srv.PrivateKey)
 	if err != nil {
-		srv.log.Trace("[Server]Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
+		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		// INSERT TABLE //
+		fmt.Println(c.fd.RemoteAddr().String(), "|", err.Error())
 		_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "SetConn-RLPx Handshake Failed", "", c.fd.RemoteAddr().String(), err.Error(), "")
 		if nFErr != nil {
 			fmt.Printf("Failed to insert log: RLPx Handshake Failed")
@@ -1077,15 +1078,13 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return fmt.Errorf("%w: %v", errEncHandshakeError, err)
 	}
 
-	srv.log.Trace("[Server]Success RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, c.fd.LocalAddr())
-
 	if dialDest != nil {
 		c.node = dialDest
 	} else {
 		c.node = nodeFromConn(remotePubkey, c.fd)
 	}
 	// INSERT TABLE //
-	_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type,name, addr, message,pid) VALUES (?,?,?,?,?)", "SetConn-RLPx Handshake Success", c.name, c.fd.RemoteAddr().String(), "", c.node.ID().String())
+	_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-RLPx Handshake Success", "", c.fd.RemoteAddr().String(), "", c.node.ID().String())
 	if nFErr != nil {
 		fmt.Printf("Failed to insert log: RLPx Handshake Success\n")
 	}
@@ -1095,7 +1094,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	tempNodeId := c.node.ID().String()
 	err = srv.checkpoint(c, srv.checkpointPostHandshake)
 	if err != nil {
-		clog.Trace("[Server]Rejected peer", "err", err)
+		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
 		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Rejected Peer[CheckPointPostHandshake]", "", c.fd.RemoteAddr().String(), err.Error(), tempNodeId)
 		if nFErr != nil {
@@ -1104,7 +1103,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		// INSERT TABLE //
 		return err
 	}
-	srv.log.Trace("[Server]Accepted peer", "addr", c.fd.RemoteAddr().String())
+	srv.log.Trace("Accepted peer", "addr", c.fd.RemoteAddr().String())
 	// INSERT TABLE //
 	_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Accepted Peer", "", c.fd.RemoteAddr().String(), "", c.node.ID().String())
 	if nFErr != nil {
@@ -1114,7 +1113,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	// Run the capability negotiation handshake.
 	phs, err := c.doProtoHandshake(srv.ourHandshake)
 	if err != nil {
-		clog.Trace("[Server]Failed p2p handshake", "err", err)
+		clog.Trace("Failed p2p handshake", "err", err)
 		// INSERT TABLE //
 		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-P2P Handshake Failed", "", c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
 		if nFErr != nil {
@@ -1123,10 +1122,9 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		// INSERT TABLE //
 		return fmt.Errorf("%w: %v", errProtoHandshakeError, err)
 	}
-	srv.log.Trace("[Server]Success p2p handshake", "Name", phs.Name, "ID", hex.EncodeToString(phs.ID))
 
 	if id := c.node.ID(); !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
-		clog.Trace("[Server]Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
+		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
 		// INSERT TABLE //
 		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message,pid) VALUES (?,?,?,?,?)", "SetConn-P2P Handshake Failed", phs.Name, c.fd.RemoteAddr().String(), DiscUnexpectedIdentity.String(), hex.EncodeToString(phs.ID))
 		if nFErr != nil {
@@ -1140,10 +1138,10 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	if nFErr != nil {
 		fmt.Printf("Failed to insert log: P2P Handshake Success\n")
 	}
-	// INSERT TABLE //
+	c.caps, c.name = phs.Caps, phs.Name
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
-		clog.Trace("[Server]Rejected peer", "err", err)
+		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
 		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type,name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Rejected peer[CheckPoint]", phs.Name, c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
 		if nFErr != nil {
