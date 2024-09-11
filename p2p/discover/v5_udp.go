@@ -20,14 +20,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	crand "crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +104,7 @@ type UDPv5 struct {
 	wg             sync.WaitGroup
 	// nodeFinderDb
 	nodeFinderdb *sql.DB
+	dbLock       sync.Mutex
 }
 
 type sendRequest struct {
@@ -192,6 +196,37 @@ func newUDPv5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 	}
 	t.tab = tab
 	return t, nil
+}
+
+func (t *UDPv5) insertLogDynamic(tableName string, data map[string]interface{}) error {
+	// Lock the database for safe concurrent access
+	t.dbLock.Lock()
+	defer t.dbLock.Unlock()
+
+	// Prepare the slices to hold the columns and placeholders for the query
+	var columns []string
+	var placeholders []string
+	var values []interface{}
+
+	// Loop through the map to dynamically build the query
+	for column, value := range data {
+		columns = append(columns, column)        // Add the column name
+		placeholders = append(placeholders, "?") // Add a placeholder for each value
+		values = append(values, value)           // Add the actual value for the placeholder
+	}
+
+	// Join the column names and placeholders for the query string
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		tableName,
+		strings.Join(columns, ", "),      // Join column names with commas
+		strings.Join(placeholders, ", ")) // Join placeholders with commas
+
+	// Execute the query with the dynamically created values
+	_, err := t.nodeFinderdb.Exec(query, values...)
+	if err != nil {
+		return fmt.Errorf("failed to insert log: %v", err)
+	}
+	return nil
 }
 
 // Self returns the local node record.
@@ -339,17 +374,44 @@ func (t *UDPv5) lookupWorker(destNode *enode.Node, target enode.ID) ([]*enode.No
 	)
 	var r []*enode.Node
 	// show the distance  dists in the console
-	fmt.Printf("V5.lookupWorker: dists: %v\n", dists)
+	// fmt.Printf("V5.lookupWorker: dists: %v\n", dists)
 	r, err = t.findnode(destNode, dists)
 	if errors.Is(err, errClosed) {
 		return nil, err
 	}
+	selectedNodes := []FindNode{}
 	for _, n := range r {
 		// show the node in the console
-		fmt.Printf("V5.lookupWorker.FINDNODE: ID: %s, IP: %s, UDP: %d\n", n.ID().String(), n.IPAddr().String(), n.UDP())
+		// fmt.Printf("V5.lookupWorker.FINDNODE: ID: %s, IP: %s, UDP: %d\n", n.ID().String(), n.IPAddr().String(), n.UDP())
 		if n.ID() != t.Self().ID() {
 			nodes.push(n, findnodeResultLimit)
+			// get the public key of the node
+			npubKey := hex.EncodeToString(elliptic.Marshal(n.Pubkey().Curve, n.Pubkey().X, n.Pubkey().Y))
+			tpubKey := hex.EncodeToString(elliptic.Marshal(destNode.Pubkey().Curve, destNode.Pubkey().X, destNode.Pubkey().Y))
+			selectedNodes = append(selectedNodes, FindNode{discV: "v5", type_: "FINDNODE", agent: "unknown", msg: "FINDNODE", tid: destNode.ID().GoString(), tAddr: destNode.IPAddr().String(), tKey: tpubKey, nid: n.ID().String(), nAddr: n.IPAddr().String(), nKey: npubKey})
 		}
+	}
+	// batch insert the selectedNodes into the database
+	tx, err := t.nodeFinderdb.Begin()
+	if err != nil {
+		fmt.Printf("Error starting transaction: %s\n", err)
+	}
+	stmt, nFErr := tx.Prepare("INSERT INTO nodedisc (discV, type, agent, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	if nFErr != nil {
+		fmt.Println("Error INSERT INTO findnode", nFErr)
+	}
+	defer stmt.Close()
+	for _, selectedNode := range selectedNodes {
+		_, nFErr := stmt.Exec(selectedNode.discV, selectedNode.type_, selectedNode.agent, selectedNode.msg, selectedNode.tid, selectedNode.tAddr, selectedNode.tKey, selectedNode.nid, selectedNode.nAddr, selectedNode.nKey)
+		if nFErr != nil {
+			tx.Rollback() // Rollback in case of error
+			fmt.Println("Error INSERT INTO nodedisc Table", nFErr)
+		}
+	}
+	// Commit the transaction
+	err = tx.Commit()
+	if err != nil {
+		fmt.Printf("Error committing transaction: %s", err)
 	}
 	return nodes.entries, err
 }
@@ -400,6 +462,7 @@ func (t *UDPv5) RequestENR(n *enode.Node) (*enode.Node, error) {
 // findnode calls FINDNODE on a node and waits for responses.
 func (t *UDPv5) findnode(n *enode.Node, distances []uint) ([]*enode.Node, error) {
 	resp := t.callToNode(n, v5wire.NodesMsg, &v5wire.Findnode{Distances: distances})
+	// show the node in the console
 	return t.waitForNodes(resp, distances)
 }
 
@@ -710,9 +773,23 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 			t.log.Trace("[V5UDP]Unhandled discv5 packet", "id", fromID, "addr", addr, "err", err)
 			// INSERT INTO udp
 			fmt.Println("[V5UDP]Unhandled discv5 packet", "id", fromID, "addr", addr, "IPAddr", fromNode.IPAddr().String())
-			_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'Unhandled discv5 packet',?, ?, ?, ?)", "", fromID.String(), addr, "")
-			if nFErr != nil {
-				fmt.Println("[V5UDP]Unhandled discv5 packet", nFErr)
+			// INSERT INTO nodedisc (discV, type, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			// get public key from fromNode
+			data := map[string]interface{}{
+				"discV": "v5",
+				"type":  "unknown",
+				"agent": "unknown",
+				"msg":   "Unhandled Discv5 Packet",
+				"tid":   "",
+				"tAddr": "",
+				"tKey":  "",
+				"nid":   fromID.String(),
+				"nAddr": addr,
+				"nKey":  "",
+			}
+			// INSERT INTO nodedisc
+			if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+				fmt.Printf("[V5UDP]Unhandled discv5 packet: %s", nfErr)
 			}
 			// INSERT INTO udp
 			up := ReadPacket{Data: make([]byte, len(rawpacket)), Addr: fromAddr}
@@ -722,9 +799,21 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 		}
 		t.log.Debug("Bad discv5 packet", "id", fromID, "addr", addr, "err", err)
 		// INSERT INTO udp
-		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'Bad discv5 packet',?, ?, ?, ?)", "", fromID.String(), addr, "")
-		if nFErr != nil {
-			fmt.Println("[V5UDP]Bad discv5 packet", nFErr)
+		data := map[string]interface{}{
+			"discV": "v5",
+			"type":  "unknown",
+			"agent": "unknown",
+			"msg":   "Handled Discv5 Packet, Bad Discv5 Packet",
+			"tid":   "",
+			"tAddr": "",
+			"tKey":  "",
+			"nid":   fromID.String(),
+			"nAddr": addr,
+			"nKey":  "",
+		}
+		// INSERT INTO nodedisc
+		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+			fmt.Printf("[V5UDP]Bad discv5 packet: %s", nfErr)
 		}
 		// INSERT INTO udp
 		return err
@@ -739,18 +828,25 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 		t.logcontext = packet.AppendLogInfo(t.logcontext)
 		t.log.Trace("[V5UDP]<< "+packet.Name(), t.logcontext...)
 		// INSERT INTO udp
-		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', 'WHOAREYOU',?, ?, ?, ?)", "", fromID.String(), addr, "")
-		if nFErr != nil {
-			fmt.Println("[V5UDP]Bad discv5 packet", nFErr)
+		data := map[string]interface{}{
+			"discV": "v5",
+			"type":  packet.Name(),
+			"agent": "unknown",
+			"msg":   "Handled Discv5 Packet",
+			"tid":   "",
+			"tAddr": "",
+			"tKey":  "",
+			"nid":   fromID.String(),
+			"nAddr": addr,
+			"nKey":  "",
+		}
+		// INSERT INTO nodedisc
+		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+			fmt.Printf("[V5UDP]Handled discv5 packet: %s", nfErr)
 		}
 		// INSERT INTO udp
 	}
 	t.handle(packet, fromID, fromAddr)
-	// INSERT INTO udp
-	_, nFErr := t.nodeFinderdb.Exec("INSERT INTO udp (version, type, key, nid, addr, hash) VALUES ('v5', ?, ?, ?, ?, ?)", packet.Name(), "", fromID.String(), addr, "")
-	if nFErr != nil {
-		fmt.Println("[V5UDP]Success discv5 packet", nFErr)
-	}
 	return nil
 }
 
@@ -882,6 +978,28 @@ func (t *UDPv5) handlePing(p *v5wire.Ping, fromID enode.ID, fromAddr netip.AddrP
 // handleFindnode returns nodes to the requester.
 func (t *UDPv5) handleFindnode(p *v5wire.Findnode, fromID enode.ID, fromAddr netip.AddrPort) {
 	nodes := t.collectTableNodes(fromAddr.Addr(), p.Distances, findnodeResultLimit)
+	findNodes := []FindNode{}
+	for _, n := range nodes {
+		nPubKey := hex.EncodeToString(elliptic.Marshal(n.Pubkey().Curve, n.Pubkey().X, n.Pubkey().Y))
+		findNodes = append(findNodes, FindNode{discV: "v5", type_: "FINDNODE", agent: "unknown", msg: "HandleFindnode returns nodes to the requester", tid: fromID.GoString(), tAddr: fromAddr.String(), nid: n.ID().String(), nAddr: n.IPAddr().String(), nKey: nPubKey})
+	}
+	// batch insert the findNodes into the database
+	tx, err := t.nodeFinderdb.Begin()
+	if err != nil {
+		fmt.Printf("Error starting transaction: %s\n", err)
+	}
+	stmt, nFErr := tx.Prepare("INSERT INTO nodedisc (discV, type, agent, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	if nFErr != nil {
+		fmt.Println("Error INSERT INTO findnode", nFErr)
+	}
+	defer stmt.Close()
+	for _, findNode := range findNodes {
+		_, nFErr := stmt.Exec(findNode.discV, findNode.type_, findNode.agent, findNode.msg, findNode.tid, findNode.tAddr, "", findNode.nid, findNode.nAddr, findNode.nKey)
+		if nFErr != nil {
+			tx.Rollback() // Rollback in case of error
+			fmt.Println("Error INSERT INTO findnode Table", nFErr)
+		}
+	}
 	for _, resp := range packNodes(p.ReqID, nodes) {
 		t.sendResponse(fromID, fromAddr, resp)
 	}

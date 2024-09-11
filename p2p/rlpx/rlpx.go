@@ -630,10 +630,10 @@ func (h *handshakeState) readMsg(msg interface{}, prv *ecdsa.PrivateKey, r io.Re
 	// trailing data (forward-compatibility).
 	s := rlp.NewStream(bytes.NewReader(dec), 0)
 	err = s.Decode(msg)
-	rt_data := h.rbuf.data[:len(prefix)+len(packet)]
+	// rt_data := h.rbuf.data[:len(prefix)+len(packet)]
 	// show the rt_data to the console
 	// fmt.Printf("RLPX.readMsg: %s\n", rt_data)
-	return rt_data, err
+	return h.rbuf.data[:len(prefix)+len(packet)], err
 }
 
 // sealEIP8 encrypts a handshake message.

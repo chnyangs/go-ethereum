@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +67,9 @@ const (
 
 	// Maximum amount of time allowed for writing a complete message.
 	frameWriteTimeout = 20 * time.Second
+
+	// TABELE NAME
+	tbP2P = "p2pserver"
 )
 
 var (
@@ -215,6 +219,7 @@ type Server struct {
 	// State of run loop and listenLoop.
 	inboundHistory expHeap
 	nodeFinderdb   *sql.DB
+	dbLock         sync.Mutex
 }
 
 type peerOpFunc func(map[enode.ID]*Peer)
@@ -309,6 +314,83 @@ func (c *conn) set(f connFlag, val bool) {
 	}
 }
 
+func (srv *Server) insertLogDynamic(tableName string, data map[string]interface{}) error {
+	// Lock the database for safe concurrent access
+	srv.dbLock.Lock()
+	defer srv.dbLock.Unlock()
+
+	// Prepare the slices to hold the columns and placeholders for the query
+	var columns []string
+	var placeholders []string
+	var values []interface{}
+
+	// Loop through the map to dynamically build the query
+	for column, value := range data {
+		columns = append(columns, column)        // Add the column name
+		placeholders = append(placeholders, "?") // Add a placeholder for each value
+		values = append(values, value)           // Add the actual value for the placeholder
+	}
+
+	// Join the column names and placeholders for the query string
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		tableName,
+		strings.Join(columns, ", "),      // Join column names with commas
+		strings.Join(placeholders, ", ")) // Join placeholders with commas
+
+	// Execute the query with the dynamically created values
+	_, err := srv.nodeFinderdb.Exec(query, values...)
+	if err != nil {
+		return fmt.Errorf("failed to insert log: %v", err)
+	}
+	return nil
+}
+func initFindNodeDB() (*sql.DB, error) {
+	// open the db
+	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	if nfErr != nil {
+		return nil, nfErr
+	}
+	nodeFinddb.SetMaxOpenConns(100)
+	nodeFinddb.SetMaxIdleConns(50)
+	// Enable WAL mode
+	_, nfErr = nodeFinddb.Exec("PRAGMA journal_mode=WAL;")
+	if nfErr != nil {
+		return nil, nfErr
+	}
+	// Create the table if it doesn't exist
+	createTableQuery := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			type TEXT,
+			name TEXT,
+			addr TEXT,
+			message TEXT,
+			pid TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`, tbP2P)
+	_, nfErr = nodeFinddb.Exec(createTableQuery)
+	if nfErr != nil {
+		fmt.Printf("Failed to create table: %s", nfErr)
+		return nil, nfErr
+	}
+	// Create the trigger to automatically set created_at if not provided
+	createTriggerQuery := fmt.Sprintf(`
+		CREATE TRIGGER IF NOT EXISTS set_created_at
+		BEFORE INSERT ON %s
+		FOR EACH ROW
+		WHEN NEW.created_at IS NULL
+		BEGIN
+			SELECT NEW.created_at = CURRENT_TIMESTAMP;
+		END;
+	`, tbP2P)
+	_, nfErr = nodeFinddb.Exec(createTriggerQuery)
+	if nfErr != nil {
+		return nil, nfErr
+	}
+	return nodeFinddb, nil
+}
+
 // LocalNode returns the local node record.
 func (srv *Server) LocalNode() *enode.LocalNode {
 	return srv.localnode
@@ -358,9 +440,15 @@ func (srv *Server) RemovePeer(node *enode.Node) {
 			ch = make(chan *PeerEvent, 1)
 			sub = srv.peerFeed.Subscribe(ch)
 			// INSERT TABLE //
-			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Disconnect Reason", "RemovePeer", peer.RemoteAddr().String(), DiscRequested, peer.ID().String())
-			if nFErr != nil {
-				fmt.Printf("Failed to insert log: %v", "Connection Failed")
+			data := map[string]interface{}{
+				"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
+				"name":    "unknown",                  // agent name
+				"addr":    peer.RemoteAddr().String(), // remote address including ip and port
+				"message": "RemovePeer",               // disconnect reason
+				"pid":     peer.ID().String(),         // peer id
+			}
+			if nfErr := srv.insertLogDynamic(tbP2P, data); nfErr != nil {
+				fmt.Printf("Failed to insert log Connection Failed: %s", nfErr)
 			}
 			// INSERT TABLE //
 			peer.Disconnect(DiscRequested)
@@ -438,6 +526,8 @@ func (srv *Server) Stop() {
 	close(srv.quit)
 	srv.lock.Unlock()
 	srv.loopWG.Wait()
+	defer srv.nodeFinderdb.Close()
+
 }
 
 // sharedUDPConn implements a shared connection. Write sends messages to the underlying connection while read returns
@@ -541,44 +631,12 @@ func (srv *Server) setupLocalNode() error {
 	}
 	srv.nodedb = db
 	// create the NodeFinder db
+	nodeFinddb, nfErr := initFindNodeDB()
+	if nfErr != nil {
+		return nfErr
+	}
 	// create a new db if it doesn't exist
-	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
-	if nfErr != nil {
-		return nfErr
-	}
-	// Enable WAL mode
-	_, nfErr = nodeFinddb.Exec("PRAGMA journal_mode=WAL;")
-	if nfErr != nil {
-		return nfErr
-	}
-	// Create the table if it doesn't exist
-	_, nfErr = nodeFinddb.Exec(`
-		CREATE TABLE IF NOT EXISTS p2pserver (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			type TEXT,
-			name TEXT,
-			addr TEXT,
-			message TEXT,
-			pid TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-	`)
-	if nfErr != nil {
-		return nfErr
-	}
-	// Create the trigger to automatically set created_at if not provided
-	_, nfErr = nodeFinddb.Exec(`
-		CREATE TRIGGER IF NOT EXISTS set_created_at
-		BEFORE INSERT ON p2pserver
-		FOR EACH ROW
-		WHEN NEW.created_at IS NULL
-		BEGIN
-			SELECT NEW.created_at = CURRENT_TIMESTAMP;
-		END;
-	`)
-	if nfErr != nil {
-		return nfErr
-	}
+
 	srv.nodeFinderdb = nodeFinddb
 	srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
 	srv.localnode.SetFallbackIP(net.IP{127, 0, 0, 1})
@@ -588,6 +646,7 @@ func (srv *Server) setupLocalNode() error {
 			srv.localnode.Set(e)
 		}
 	}
+	// Ensure the connection is closed when done
 	return nil
 }
 
@@ -772,7 +831,6 @@ func (srv *Server) run() {
 	defer srv.nodedb.Close()
 	defer srv.discmix.Close()
 	defer srv.dialsched.stop()
-	defer srv.nodeFinderdb.Close()
 	var (
 		peers        = make(map[enode.ID]*Peer)
 		inboundCount = 0
@@ -828,12 +886,6 @@ running:
 			// At this point the connection is past the protocol handshake.
 			// Its capabilities are known and the remote identity is verified.
 			err := srv.addPeerChecks(peers, inboundCount, c)
-			// INSERT TABLE //
-			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Disconnect Reason", "", c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
-			if nFErr != nil {
-				fmt.Printf("Failed to insert log: %v", "Connection Failed")
-			}
-			// INSERT TABLE //
 			if err == nil {
 				// The handshakes are done and it passed all checks.
 				p := srv.launchPeer(c)
@@ -849,6 +901,18 @@ running:
 					activeOutboundPeerGauge.Inc(1)
 				}
 				activePeerGauge.Inc(1)
+				// INSERT TABLE //
+				data := map[string]interface{}{
+					"type":    "Connection Success",           // log type, used to categorize logs in different stages
+					"name":    p.Name(),                       // agent name
+					"addr":    p.RemoteAddr().String(),        // remote address including ip and port
+					"message": "Adding p2p peer Successfully", // connection success message
+					"pid":     p.ID().String(),                // peer id
+				}
+				if nfErr := srv.insertLogDynamic(tbP2P, data); nfErr != nil {
+					fmt.Printf("Failed to insert log - Connection Failed: %s", nfErr)
+				}
+				// INSERT TABLE //
 			}
 			c.cont <- err
 
@@ -969,11 +1033,16 @@ func (srv *Server) listenLoop() {
 		remoteIP := netutil.AddrAddr(fd.RemoteAddr())
 		if err := srv.checkInboundConn(remoteIP); err != nil {
 			srv.log.Debug("Rejected inbound connection", "addr", fd.RemoteAddr(), "err", err)
-
 			// INSERT TABLE //
-			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Rejected Inbound Connection", "", fd.RemoteAddr().String(), err.Error(), "")
-			if nFErr != nil {
-				fmt.Printf("Failed to insert log: Rejected Inbound Connection")
+			data := map[string]interface{}{
+				"type":    "Disconnect Reason",           // log type, used to categorize logs in different stages
+				"name":    "unknown",                     // agent name
+				"addr":    fd.RemoteAddr().String(),      // remote address including ip and port
+				"message": "Rejected Inbound Connection", // disconnect reason
+				"pid":     "",                            // peer id
+			}
+			if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+				fmt.Printf("Failed to insert log: Rejected Inbound Connection: %s", nFErr)
 			}
 			// INSERT TABLE //
 			fd.Close()
@@ -985,9 +1054,15 @@ func (srv *Server) listenLoop() {
 			serveMeter.Mark(1)
 			srv.log.Trace("Accepted connection", "addr", fd.RemoteAddr())
 			// INSERT TABLE //
-			_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Accepted Inbound Connection", "", fd.RemoteAddr().String(), "", "")
-			if nFErr != nil {
-				fmt.Printf("Failed to insert log: Accept Inbound Connection")
+			data := map[string]interface{}{
+				"type":    "Accepted Connection",         // log type, used to categorize logs in different stages
+				"name":    "unknown",                     // agent name
+				"addr":    fd.RemoteAddr().String(),      // remote address including ip and port
+				"message": "Accepted Inbound connection", // connection success message
+				"pid":     "",                            // peer id
+			}
+			if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+				fmt.Printf("Failed to insert log: Accept Inbound Connection: %s", nFErr)
 			}
 			// INSERT TABLE //
 		}
@@ -1047,7 +1122,6 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		return errServerStopped
 	}
 	// Your database operations go here...
-	nfDb := srv.nodeFinderdb
 	// If dialing, figure out the remote public key.
 	if dialDest != nil {
 		dialPubkey := new(ecdsa.PublicKey)
@@ -1055,9 +1129,15 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 			err = fmt.Errorf("%w: dial destination doesn't have a secp256k1 public key", errEncHandshakeError)
 			srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err, c.node.ID(), c.node.IP())
 			// INSERT TABLE //
-			_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "SetConn-Dial Failed", "", c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
-			if nFErr != nil {
-				fmt.Printf("Failed to insert log: Dial Failed")
+			data := map[string]interface{}{
+				"type":    "Disconnect Reason",                                    // log type, used to categorize logs in different stages
+				"name":    "unknown",                                              // agent name
+				"addr":    c.fd.RemoteAddr().String(),                             // remote address including ip and port
+				"message": "dial destination doesn't have a secp256k1 public key", // disconnect reason
+				"pid":     c.node.ID().String(),                                   // peer id
+			}
+			if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+				fmt.Printf("Failed to insert log: Dial Failed: %s", nFErr)
 			}
 			// INSERT TABLE //
 			return err
@@ -1069,10 +1149,15 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	if err != nil {
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		// INSERT TABLE //
-		fmt.Println(c.fd.RemoteAddr().String(), "|", err.Error())
-		_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "SetConn-RLPx Handshake Failed", "", c.fd.RemoteAddr().String(), err.Error(), "")
-		if nFErr != nil {
-			fmt.Printf("Failed to insert log: RLPx Handshake Failed")
+		data := map[string]interface{}{
+			"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
+			"name":    "unknown",                  // agent name
+			"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
+			"message": "Failed RLPx handshake",    // disconnect reason
+			"pid":     "",                         // peer id if exists
+		}
+		if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+			fmt.Printf("Failed to insert log: RLPx Handshake Failed: %s", nFErr)
 		}
 		// INSERT TABLE //
 		return fmt.Errorf("%w: %v", errEncHandshakeError, err)
@@ -1084,9 +1169,15 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		c.node = nodeFromConn(remotePubkey, c.fd)
 	}
 	// INSERT TABLE //
-	_, nFErr := nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-RLPx Handshake Success", "", c.fd.RemoteAddr().String(), "", c.node.ID().String())
-	if nFErr != nil {
-		fmt.Printf("Failed to insert log: RLPx Handshake Success\n")
+	data := map[string]interface{}{
+		"type":    "RLPX Handshake Success",   // log type, used to categorize logs in different stages
+		"name":    "unknown",                  // agent name
+		"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
+		"message": "RLPX Handshake Success",   // handshake success message
+		"pid":     c.node.ID().String(),       // peer id
+	}
+	if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+		fmt.Println("Failed to insert log: RLPx Handshake Success\n", "err", nFErr)
 	}
 	// INSERT TABLE //
 	clog := srv.log.New("id", c.node.ID(), "addr", c.fd.RemoteAddr(), "conn", c.flags)
@@ -1096,18 +1187,31 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
-		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Rejected Peer[CheckPointPostHandshake]", "", c.fd.RemoteAddr().String(), err.Error(), tempNodeId)
-		if nFErr != nil {
-			fmt.Printf("Failed to insert log: Rejected Peer[CheckPointPostHandshake]")
+		data := map[string]interface{}{
+			"type":    "Disconnect Reason",                                              // log type, used to categorize logs in different stages
+			"name":    "unknown",                                                        // agent name
+			"addr":    c.fd.RemoteAddr().String(),                                       // remote address including ip and port
+			"message": "After RLPX handshake, Rejected Peer at CheckPointPostHandshake", // disconnect reason
+			"pid":     tempNodeId,                                                       // peer id
+		}
+		if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+			fmt.Printf("Failed to insert log: Rejected Peer[CheckPointPostHandshake]: %s", nFErr)
 		}
 		// INSERT TABLE //
 		return err
 	}
 	srv.log.Trace("Accepted peer", "addr", c.fd.RemoteAddr().String())
 	// INSERT TABLE //
-	_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Accepted Peer", "", c.fd.RemoteAddr().String(), "", c.node.ID().String())
-	if nFErr != nil {
-		fmt.Printf("Failed to insert log: Accepted Peer")
+	data = map[string]interface{}{
+		"type":    "Accepted Peer",                                   // log type, used to categorize logs in different stages
+		"name":    "unknown",                                         // agent name
+		"addr":    c.fd.RemoteAddr().String(),                        // remote address including ip and port
+		"message": "Accepted peer, pass the CheckPointPostHandshake", // connection success message
+		"pid":     tempNodeId,                                        // peer id
+	}
+	if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+		// if nFErr != nil {
+		fmt.Printf("Failed to insert log: Accepted Peer: %s", nFErr)
 	}
 	// INSERT TABLE //
 	// Run the capability negotiation handshake.
@@ -1115,9 +1219,15 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	if err != nil {
 		clog.Trace("Failed p2p handshake", "err", err)
 		// INSERT TABLE //
-		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type, name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-P2P Handshake Failed", "", c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
-		if nFErr != nil {
-			fmt.Printf("Failed to insert log: Server]Failed p2p handshake\n")
+		data := map[string]interface{}{
+			"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
+			"name":    "unknown",                  // agent name
+			"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
+			"message": "Failed p2p handshake",     // disconnect reason
+			"pid":     c.node.ID().String(),       // peer id
+		}
+		if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+			fmt.Printf("Failed to insert log: Server]Failed p2p handshake: %s", nFErr)
 		}
 		// INSERT TABLE //
 		return fmt.Errorf("%w: %v", errProtoHandshakeError, err)
@@ -1126,26 +1236,44 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	if id := c.node.ID(); !bytes.Equal(crypto.Keccak256(phs.ID), id[:]) {
 		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
 		// INSERT TABLE //
-		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type,name,addr,message,pid) VALUES (?,?,?,?,?)", "SetConn-P2P Handshake Failed", phs.Name, c.fd.RemoteAddr().String(), DiscUnexpectedIdentity.String(), hex.EncodeToString(phs.ID))
-		if nFErr != nil {
-			fmt.Printf("Failed to insert log: Wrong devp2p handshake identity\n")
+		data := map[string]interface{}{
+			"type":    "Disconnect Reason",                                              // log type, used to categorize logs in different stages
+			"name":    "unknown",                                                        // agent name
+			"addr":    c.fd.RemoteAddr().String(),                                       // remote address including ip and port
+			"message": "After ProtoHandshake, detected Wrong devp2p handshake identity", // disconnect reason
+			"pid":     id.String(),                                                      // peer id
+		}
+		if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+			fmt.Printf("Failed to insert log: Wrong devp2p handshake identity: %s", nFErr)
 		}
 		// INSERT TABLE //
 		return DiscUnexpectedIdentity
 	}
 	// INSERT TABLE //
-	_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type,name,addr, message,pid) VALUES (?,?,?,?,?)", "SetConn-P2P Handshake Success", phs.Name, c.fd.RemoteAddr().String(), "", hex.EncodeToString(phs.ID))
-	if nFErr != nil {
-		fmt.Printf("Failed to insert log: P2P Handshake Success\n")
+	dataInsert := map[string]interface{}{
+		"type":    "P2P Handshake Success",    // log type, used to categorize logs in different stages
+		"name":    phs.Name,                   // agent name
+		"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
+		"message": "P2P Handshake Success",    // connection success message
+		"pid":     c.node.ID().String(),       // peer id
+	}
+	if nFErr := srv.insertLogDynamic(tbP2P, dataInsert); nFErr != nil {
+		fmt.Printf("Failed to insert log: P2P Handshake Success: %s", nFErr)
 	}
 	c.caps, c.name = phs.Caps, phs.Name
 	err = srv.checkpoint(c, srv.checkpointAddPeer)
 	if err != nil {
 		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
-		_, nFErr = nfDb.Exec("INSERT INTO p2pserver (type,name, addr, message, pid) VALUES (?,?,?,?,?)", "SetConn-Rejected peer[CheckPoint]", phs.Name, c.fd.RemoteAddr().String(), err.Error(), c.node.ID().String())
-		if nFErr != nil {
-			fmt.Printf("Failed to insert log: %v", "Rejected peer[CheckPoint]")
+		data := map[string]interface{}{
+			"type":    "Disconnect Reason",                                       // log type, used to categorize logs in different stages
+			"name":    "unknown",                                                 // agent name
+			"addr":    c.fd.RemoteAddr().String(),                                // remote address including ip and port
+			"message": "After P2P Handshake, Rejected peer at CheckPointAddPeer", // disconnect reason
+			"pid":     c.node.ID().String(),                                      // peer id
+		}
+		if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+			fmt.Printf("Failed to insert log: Rejected peer[CheckPoint]: %s", nFErr)
 		}
 		// INSERT TABLE //
 		return err
@@ -1201,10 +1329,15 @@ func (srv *Server) runPeer(p *Peer) {
 	// Run the per-peer main loop.
 	remoteRequested, err := p.run()
 	// INSERT TABLE //
-	fmt.Println("Remote Requested: s%", p.rw.name)
-	_, nFErr := srv.nodeFinderdb.Exec("INSERT INTO p2pserver (type,name,addr,message, pid) VALUES (?,?,?,?,?)", "Disconnect Reason", "", p.RemoteAddr().String(), err.Error(), p.ID().String())
-	if nFErr != nil {
-		fmt.Printf("Failed to insert log: %v", "Connection Failed")
+	data := map[string]interface{}{
+		"type":    "Disconnect Reason",                   // log type, used to categorize logs in different stages
+		"name":    p.rw.name,                             // agent name
+		"addr":    p.RemoteAddr().String(),               // remote address including ip and port
+		"message": "Peer Disconnected by Remote Request", // disconnect reason
+		"pid":     p.ID().String(),                       // peer id
+	}
+	if nFErr := srv.insertLogDynamic(tbP2P, data); nFErr != nil {
+		fmt.Printf("Failed to insert log Connection Failed: %s", nFErr)
 	}
 	// Announce disconnect on the main loop to update the peer set.
 	// The main loop waits for existing peers to be sent on srv.delpeer
