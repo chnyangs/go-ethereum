@@ -22,7 +22,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	crand "crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -30,18 +29,16 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/nf"
 	"github.com/ethereum/go-ethereum/p2p/discover/v5wire"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
-	dbParams "github.com/ethereum/go-ethereum/params"
-	"github.com/spf13/viper"
 )
 
 const (
@@ -104,8 +101,6 @@ type UDPv5 struct {
 	closeCtx       context.Context
 	cancelCloseCtx context.CancelFunc
 	wg             sync.WaitGroup
-	// nodeFinderDb
-	nodeFinderdb *sql.DB
 }
 
 type sendRequest struct {
@@ -143,21 +138,7 @@ type callTimeout struct {
 func ListenV5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 	t, err := newUDPv5(conn, ln, cfg)
 	// nodeFinderdb
-	viper.SetConfigName("dbconfig") // The name of the config file without extension
-	viper.SetConfigType("yaml")     // The file type
-	viper.AddConfigPath("../")      // Path to look for the config file, relative to Folder B/C
-
-	// Read the configuration file
-	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
-	}
-	dbPath := viper.GetString("database.EXECUTION_DB_PATH")
-	nodeFinddb, nfErr := sql.Open("sqlite3", dbPath)
-	if nfErr != nil {
-		fmt.Println("Error opening database", nfErr)
-	}
-	// nodeFinderdb
-	t.nodeFinderdb = nodeFinddb
+	nf.InitEecDB()
 	if err != nil {
 		return nil, err
 	}
@@ -206,37 +187,6 @@ func newUDPv5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 	}
 	t.tab = tab
 	return t, nil
-}
-
-func (t *UDPv5) insertLogDynamic(tableName string, data map[string]interface{}) error {
-	// Lock the database for safe concurrent access
-	dbParams.DbLock.Lock()
-	defer dbParams.DbLock.Unlock()
-
-	// Prepare the slices to hold the columns and placeholders for the query
-	var columns []string
-	var placeholders []string
-	var values []interface{}
-
-	// Loop through the map to dynamically build the query
-	for column, value := range data {
-		columns = append(columns, column)        // Add the column name
-		placeholders = append(placeholders, "?") // Add a placeholder for each value
-		values = append(values, value)           // Add the actual value for the placeholder
-	}
-
-	// Join the column names and placeholders for the query string
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		tableName,
-		strings.Join(columns, ", "),      // Join column names with commas
-		strings.Join(placeholders, ", ")) // Join placeholders with commas
-
-	// Execute the query with the dynamically created values
-	_, err := t.nodeFinderdb.Exec(query, values...)
-	if err != nil {
-		return fmt.Errorf("failed to insert log: %v", err)
-	}
-	return nil
 }
 
 // Self returns the local node record.
@@ -402,26 +352,25 @@ func (t *UDPv5) lookupWorker(destNode *enode.Node, target enode.ID) ([]*enode.No
 		}
 	}
 	// batch insert the selectedNodes into the database
-	tx, err := t.nodeFinderdb.Begin()
-	if err != nil {
-		fmt.Printf("Error starting transaction: %s\n", err)
-	}
-	stmt, nFErr := tx.Prepare("INSERT INTO nodedisc (discV, type, agent, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-	if nFErr != nil {
-		fmt.Println("Error INSERT INTO nodedisc", nFErr)
-	}
-	defer stmt.Close()
+
 	for _, selectedNode := range selectedNodes {
-		_, nFErr := stmt.Exec(selectedNode.discV, selectedNode.type_, selectedNode.agent, selectedNode.msg, selectedNode.tid, selectedNode.tAddr, selectedNode.tKey, selectedNode.nid, selectedNode.nAddr, selectedNode.nKey)
-		if nFErr != nil {
-			tx.Rollback() // Rollback in case of error
-			fmt.Println("Error INSERT INTO nodedisc Table", nFErr)
+		data := map[string]interface{}{
+			"discV": selectedNode.discV,
+			"type":  selectedNode.type_,
+			"agent": selectedNode.agent,
+			"msg":   selectedNode.msg,
+			"tid":   selectedNode.tid,
+			"tAddr": selectedNode.tAddr,
+			"tKey":  selectedNode.tKey,
+			"nid":   selectedNode.nid,
+			"nAddr": selectedNode.nAddr,
+			"nKey":  selectedNode.nKey,
 		}
-	}
-	// Commit the transaction
-	err = tx.Commit()
-	if err != nil {
-		fmt.Printf("Error committing transaction: %s", err)
+		// Insert the data into the database
+		insertErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data)
+		if insertErr != nil {
+			fmt.Printf("Failed to insert %s to peerData. Connection Failed: %s", nf.TbNodeDisc, insertErr)
+		}
 	}
 	return nodes.entries, err
 }
@@ -798,7 +747,7 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 				"nKey":  "",
 			}
 			// INSERT INTO nodedisc
-			if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+			if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data); nfErr != nil {
 				fmt.Printf("[V5UDP]Unhandled discv5 packet: %s", nfErr)
 			}
 			// INSERT INTO udp
@@ -822,7 +771,7 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 			"nKey":  "",
 		}
 		// INSERT INTO nodedisc
-		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+		if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data); nfErr != nil {
 			fmt.Printf("[V5UDP]Bad discv5 packet: %s", nfErr)
 		}
 		// INSERT INTO udp
@@ -851,7 +800,7 @@ func (t *UDPv5) handlePacket(rawpacket []byte, fromAddr netip.AddrPort) error {
 			"nKey":  "",
 		}
 		// INSERT INTO nodedisc
-		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+		if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data); nfErr != nil {
 			fmt.Printf("[V5UDP]Handled discv5 packet: %s", nfErr)
 		}
 		// INSERT INTO udp
@@ -994,7 +943,7 @@ func (t *UDPv5) handleFindnode(p *v5wire.Findnode, fromID enode.ID, fromAddr net
 		findNodes = append(findNodes, FindNode{discV: "v5", type_: "FINDNODE", agent: "unknown", msg: "HandleFindnode returns nodes to the requester", tid: fromID.GoString(), tAddr: fromAddr.String(), nid: n.ID().String(), nAddr: n.IPAddr().String(), nKey: nPubKey})
 	}
 	// batch insert the findNodes into the database
-	tx, err := t.nodeFinderdb.Begin()
+	tx, err := nf.Db.Begin()
 	if err != nil {
 		fmt.Printf("Error starting transaction: %s\n", err)
 	}

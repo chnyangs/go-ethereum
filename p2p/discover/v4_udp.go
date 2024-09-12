@@ -22,22 +22,19 @@ import (
 	"context"
 	"crypto/ecdsa"
 	crand "crypto/rand"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/nf"
 	"github.com/ethereum/go-ethereum/p2p/discover/v4wire"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
-	dbParams "github.com/ethereum/go-ethereum/params"
-	"github.com/spf13/viper"
 )
 
 // Errors
@@ -66,7 +63,6 @@ const (
 	// Packets larger than this size will be cut at the end and treated
 	// as invalid because their hash won't match.
 	maxPacketSize = 1280
-	tbNodeDisc    = "nodedisc"
 )
 
 // UDPv4 implements the v4 wire protocol.
@@ -85,8 +81,6 @@ type UDPv4 struct {
 	gotreply        chan reply
 	closeCtx        context.Context
 	cancelCloseCtx  context.CancelFunc
-	// nodeFinderDb
-	nodeFinderdb *sql.DB
 }
 
 type FindNode struct {
@@ -148,61 +142,14 @@ type reply struct {
 }
 
 func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
-	viper.SetConfigName("dbconfig") // The name of the config file without extension
-	viper.SetConfigType("yaml")     // The file type
-	viper.AddConfigPath("../")      // Path to look for the config file, relative to Folder B/C
-
-	// Read the configuration file
-	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
-	}
-	dbPath := viper.GetString("database.EXECUTION_DB_PATH")
-	nodeFinddb, nfErr := sql.Open("sqlite3", dbPath)
-	if nfErr != nil {
-		fmt.Println("Error opening database", nfErr)
-	}
-	_, nfErr = nodeFinddb.Exec("PRAGMA journal_mode=WAL;")
-	if nfErr != nil {
-		fmt.Println("Error opening database", nfErr)
-	}
-	// Create the table if it doesn't exist
-	createTableQuery := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			discV TEXT,
-			type TEXT,
-			agent TEXT,
-			msg TEXT,
-			tid TEXT,
-			tAddr TEXT,
-			tKey TEXT,
-			nid, TEXT,
-			nAddr TEXT,
-			nKey TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-	`, tbNodeDisc)
-	_, nfErr = nodeFinddb.Exec(createTableQuery)
-	if nfErr != nil {
-		fmt.Println("Error CREATE TABLE nodedisc", nfErr)
-	}
-	// Create the trigger to automatically set created_at if not provided
-	createTriggerQuery := fmt.Sprintf(`
-		CREATE TRIGGER IF NOT EXISTS set_created_at
-		BEFORE INSERT ON %s
-		FOR EACH ROW
-		WHEN NEW.created_at IS NULL
-		BEGIN
-			SELECT NEW.created_at = CURRENT_TIMESTAMP;
-		END;
-	`, tbNodeDisc)
-	_, nfErr = nodeFinddb.Exec(createTriggerQuery)
-	if nfErr != nil {
-		fmt.Println("Error CREATE TRIGGER on nodedisc", nfErr)
-	}
 	// configure the database
+	nf.InitEecDB()
 	cfg = cfg.withDefaults()
 	closeCtx, cancel := context.WithCancel(context.Background())
+	nfErr := nf.InitEecDB()
+	if nfErr != nil {
+		fmt.Println("Failed to initialize the database", nfErr)
+	}
 
 	t := &UDPv4{
 		conn:            newMeteredConn(c),
@@ -215,7 +162,6 @@ func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 		closeCtx:        closeCtx,
 		cancelCloseCtx:  cancel,
 		log:             cfg.Log,
-		nodeFinderdb:    nodeFinddb,
 	}
 
 	tab, err := newTable(t, ln.Database(), cfg)
@@ -234,37 +180,6 @@ func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 // Self returns the local node.
 func (t *UDPv4) Self() *enode.Node {
 	return t.localNode.Node()
-}
-
-func (t *UDPv4) insertLogDynamic(tableName string, data map[string]interface{}) error {
-	// Lock the database for safe concurrent access
-	dbParams.DbLock.Lock()
-	defer dbParams.DbLock.Unlock()
-
-	// Prepare the slices to hold the columns and placeholders for the query
-	var columns []string
-	var placeholders []string
-	var values []interface{}
-
-	// Loop through the map to dynamically build the query
-	for column, value := range data {
-		columns = append(columns, column)        // Add the column name
-		placeholders = append(placeholders, "?") // Add a placeholder for each value
-		values = append(values, value)           // Add the actual value for the placeholder
-	}
-
-	// Join the column names and placeholders for the query string
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		tableName,
-		strings.Join(columns, ", "),      // Join column names with commas
-		strings.Join(placeholders, ", ")) // Join placeholders with commas
-
-	// Execute the query with the dynamically created values
-	_, err := t.nodeFinderdb.Exec(query, values...)
-	if err != nil {
-		return fmt.Errorf("failed to insert log: %v", err)
-	}
-	return nil
 }
 
 // Close shuts down the socket and aborts any running queries.
@@ -477,8 +392,8 @@ func (t *UDPv4) findnode(toid enode.ID, toAddrPort netip.AddrPort, target v4wire
 				"nAddr": udpv4.nAddr,
 				"nKey":  udpv4.nKey,
 			}
-			if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
-				fmt.Printf("Failed to insert %s to activityData. Connection Failed: %s", tbNodeDisc, nfErr)
+			if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data); nfErr != nil {
+				fmt.Printf("Failed to insert %s to activity Data - Connection Failed: %s", nf.TbNodeDisc, nfErr)
 			}
 		}
 		// fmt.Println("[UDPV4-FINDNODE]Batch insert UDPV4 completed successfully")
@@ -748,7 +663,7 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 			"nAddr": from.String(),
 			"nKey":  fromKey.ID().String(),
 		}
-		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+		if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbNodeDisc, data); nfErr != nil {
 			fmt.Println("HandlePacket - Error INSERT INTO nodedisc", nfErr)
 		}
 		// INSERT INTO findnode Table
