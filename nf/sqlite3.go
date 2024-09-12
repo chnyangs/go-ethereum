@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/spf13/viper"
@@ -16,6 +17,7 @@ var (
 	once        sync.Once
 	TbP2PServer = "p2pserver"
 	TbNodeDisc  = "nodedisc"
+	retries     = 3
 )
 
 func initDb() error {
@@ -40,8 +42,8 @@ func initDb() error {
 func InitEecDB() error {
 	initDb()
 	// Set the maximum number of open and idle connections
-	Db.SetMaxOpenConns(100)
-	Db.SetMaxIdleConns(50)
+	Db.SetMaxOpenConns(1000)
+	Db.SetMaxIdleConns(500)
 
 	// Enable WAL mode
 	_, nfErr := Db.Exec("PRAGMA journal_mode=WAL;")
@@ -140,9 +142,18 @@ func InsertLogDynamic(db *sql.DB, tableName string, data map[string]interface{})
 		strings.Join(placeholders, ", ")) // Join placeholders with commas
 
 	// Execute the query with the dynamically created values
-	_, err := db.Exec(query, values...)
-	if err != nil {
-		return fmt.Errorf("failed to insert log: %v", err)
+	// check if the table lock is held
+
+	for i := 0; i < retries; i++ {
+		_, nfErr := db.Exec(query, values...)
+		if nfErr != nil {
+			if strings.Contains(nfErr.Error(), "database is locked") {
+				time.Sleep(100 * time.Millisecond) // Wait and retry
+				continue
+			}
+			return nfErr
+		}
+		return nil
 	}
 	return nil
 }

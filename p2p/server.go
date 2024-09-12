@@ -548,10 +548,6 @@ func (srv *Server) setupLocalNode() error {
 	if err != nil {
 		return err
 	}
-	nfErr := nf.InitEecDB()
-	if nfErr != nil {
-		return nfErr
-	}
 	srv.nodedb = db
 
 	srv.localnode = enode.NewLocalNode(db, srv.PrivateKey)
@@ -900,7 +896,10 @@ func (srv *Server) addPeerChecks(peers map[enode.ID]*Peer, inboundCount int, c *
 // inbound connections.
 func (srv *Server) listenLoop() {
 	srv.log.Debug("TCP listener up", "addr", srv.listener.Addr())
-
+	nfErr := nf.InitEecDB()
+	if nfErr != nil {
+		fmt.Printf("Failed to init db: %s", nfErr)
+	}
 	// The slots channel limits accepts of new connections.
 	tokens := defaultMaxPendingPeers
 	if srv.MaxPendingPeers > 0 {
