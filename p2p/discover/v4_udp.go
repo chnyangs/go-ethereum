@@ -23,11 +23,11 @@ import (
 	"crypto/ecdsa"
 	crand "crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/discover/v4wire"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	dbParams "github.com/ethereum/go-ethereum/params"
 	"github.com/spf13/viper"
 )
 
@@ -235,6 +236,37 @@ func (t *UDPv4) Self() *enode.Node {
 	return t.localNode.Node()
 }
 
+func (t *UDPv4) insertLogDynamic(tableName string, data map[string]interface{}) error {
+	// Lock the database for safe concurrent access
+	dbParams.DbLock.Lock()
+	defer dbParams.DbLock.Unlock()
+
+	// Prepare the slices to hold the columns and placeholders for the query
+	var columns []string
+	var placeholders []string
+	var values []interface{}
+
+	// Loop through the map to dynamically build the query
+	for column, value := range data {
+		columns = append(columns, column)        // Add the column name
+		placeholders = append(placeholders, "?") // Add a placeholder for each value
+		values = append(values, value)           // Add the actual value for the placeholder
+	}
+
+	// Join the column names and placeholders for the query string
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		tableName,
+		strings.Join(columns, ", "),      // Join column names with commas
+		strings.Join(placeholders, ", ")) // Join placeholders with commas
+
+	// Execute the query with the dynamically created values
+	_, err := t.nodeFinderdb.Exec(query, values...)
+	if err != nil {
+		return fmt.Errorf("failed to insert log: %v", err)
+	}
+	return nil
+}
+
 // Close shuts down the socket and aborts any running queries.
 func (t *UDPv4) Close() {
 	t.closeOnce.Do(func() {
@@ -431,27 +463,23 @@ func (t *UDPv4) findnode(toid enode.ID, toAddrPort netip.AddrPort, target v4wire
 			})
 			nodes = append(nodes, n)
 		}
-		// batch insert the udpv4 list
-		tx, err := t.nodeFinderdb.Begin()
-		if err != nil {
-			fmt.Printf("Error starting transaction: %s\n", err)
-		}
-		stmt, nFErr := tx.Prepare("INSERT INTO nodedisc (discV, type, agent, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		if nFErr != nil {
-			fmt.Println("Error INSERT INTO findnode", nFErr)
-		}
-		defer stmt.Close()
+		// insert the udpv4 list to the database
 		for _, udpv4 := range udpv4s {
-			_, nFErr := stmt.Exec(udpv4.discV, udpv4.type_, udpv4.agent, udpv4.msg, udpv4.tid, udpv4.tAddr, udpv4.tKey, udpv4.nid, udpv4.nAddr, udpv4.nKey)
-			if nFErr != nil {
-				tx.Rollback() // Rollback in case of error
-				fmt.Println("Error INSERT INTO discover peer", nFErr)
+			data := map[string]interface{}{
+				"discV": udpv4.discV,
+				"type":  udpv4.type_,
+				"agent": udpv4.agent,
+				"msg":   udpv4.msg,
+				"tid":   udpv4.tid,
+				"tAddr": udpv4.tAddr,
+				"tKey":  udpv4.tKey,
+				"nid":   udpv4.nid,
+				"nAddr": udpv4.nAddr,
+				"nKey":  udpv4.nKey,
 			}
-		}
-		// Commit the transaction
-		err = tx.Commit()
-		if err != nil {
-			fmt.Printf("Error committing transaction: %s", err)
+			if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+				fmt.Printf("Failed to insert %s to activityData. Connection Failed: %s", tbNodeDisc, nfErr)
+			}
 		}
 		// fmt.Println("[UDPV4-FINDNODE]Batch insert UDPV4 completed successfully")
 		return true, nreceived >= bucketSize
@@ -708,9 +736,20 @@ func (t *UDPv4) handlePacket(from netip.AddrPort, buf []byte) error {
 	if err == nil && packet.handle != nil {
 		packet.handle(packet, from, fromID, hash)
 		// INSERT INTO findnode Table
-		_, nFErr := t.nodeFinderdb.Exec("INSERT INTO findnode (version, type, key, nid, addr, hash, toid) VALUES ('v4', ?, ?, ?, ?, ?,?)", packet.Name(), fromKey.ID().String(), fromID.String(), from.String(), hex.EncodeToString(hash), "")
-		if nFErr != nil {
-			fmt.Println("Error INSERT INTO findnode", nFErr)
+		data := map[string]interface{}{
+			"discV": "v4",
+			"type":  packet.Name(),
+			"agent": "unknown",
+			"msg":   "Valid neighbor node received",
+			"tid":   "",
+			"tAddr": "",
+			"tKey":  "",
+			"nid":   fromID.String(),
+			"nAddr": from.String(),
+			"nKey":  fromKey.ID().String(),
+		}
+		if nfErr := t.insertLogDynamic(tbNodeDisc, data); nfErr != nil {
+			fmt.Println("HandlePacket - Error INSERT INTO nodedisc", nfErr)
 		}
 		// INSERT INTO findnode Table
 	}

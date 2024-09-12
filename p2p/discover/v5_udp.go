@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	dbParams "github.com/ethereum/go-ethereum/params"
 	"github.com/spf13/viper"
 )
 
@@ -105,7 +106,6 @@ type UDPv5 struct {
 	wg             sync.WaitGroup
 	// nodeFinderDb
 	nodeFinderdb *sql.DB
-	dbLock       sync.Mutex
 }
 
 type sendRequest struct {
@@ -210,8 +210,8 @@ func newUDPv5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 
 func (t *UDPv5) insertLogDynamic(tableName string, data map[string]interface{}) error {
 	// Lock the database for safe concurrent access
-	t.dbLock.Lock()
-	defer t.dbLock.Unlock()
+	dbParams.DbLock.Lock()
+	defer dbParams.DbLock.Unlock()
 
 	// Prepare the slices to hold the columns and placeholders for the query
 	var columns []string
@@ -408,7 +408,7 @@ func (t *UDPv5) lookupWorker(destNode *enode.Node, target enode.ID) ([]*enode.No
 	}
 	stmt, nFErr := tx.Prepare("INSERT INTO nodedisc (discV, type, agent, msg, tid, tAddr, tKey, nid, nAddr, nKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if nFErr != nil {
-		fmt.Println("Error INSERT INTO findnode", nFErr)
+		fmt.Println("Error INSERT INTO nodedisc", nFErr)
 	}
 	defer stmt.Close()
 	for _, selectedNode := range selectedNodes {
@@ -1007,7 +1007,7 @@ func (t *UDPv5) handleFindnode(p *v5wire.Findnode, fromID enode.ID, fromAddr net
 		_, nFErr := stmt.Exec(findNode.discV, findNode.type_, findNode.agent, findNode.msg, findNode.tid, findNode.tAddr, "", findNode.nid, findNode.nAddr, findNode.nKey)
 		if nFErr != nil {
 			tx.Rollback() // Rollback in case of error
-			fmt.Println("Error INSERT INTO findnode Table", nFErr)
+			fmt.Println("Error INSERT INTO nodedisc Table", nFErr)
 		}
 	}
 	for _, resp := range packNodes(p.ReqID, nodes) {

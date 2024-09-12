@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	dbParams "github.com/ethereum/go-ethereum/params"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/spf13/viper"
 )
@@ -220,7 +221,6 @@ type Server struct {
 	// State of run loop and listenLoop.
 	inboundHistory expHeap
 	nodeFinderdb   *sql.DB
-	dbLock         sync.Mutex
 }
 
 type peerOpFunc func(map[enode.ID]*Peer)
@@ -317,8 +317,8 @@ func (c *conn) set(f connFlag, val bool) {
 
 func (srv *Server) insertLogDynamic(tableName string, data map[string]interface{}) error {
 	// Lock the database for safe concurrent access
-	srv.dbLock.Lock()
-	defer srv.dbLock.Unlock()
+	dbParams.DbLock.Lock()
+	defer dbParams.DbLock.Unlock()
 
 	// Prepare the slices to hold the columns and placeholders for the query
 	var columns []string
