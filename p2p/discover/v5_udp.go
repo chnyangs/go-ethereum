@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	"github.com/spf13/viper"
 )
 
 const (
@@ -142,7 +143,16 @@ type callTimeout struct {
 func ListenV5(conn UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv5, error) {
 	t, err := newUDPv5(conn, ln, cfg)
 	// nodeFinderdb
-	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	viper.SetConfigName("dbconfig") // The name of the config file without extension
+	viper.SetConfigType("yaml")     // The file type
+	viper.AddConfigPath("../")      // Path to look for the config file, relative to Folder B/C
+
+	// Read the configuration file
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	dbPath := viper.GetString("database.EXECUTION_DB_PATH")
+	nodeFinddb, nfErr := sql.Open("sqlite3", dbPath)
 	if nfErr != nil {
 		fmt.Println("Error opening database", nfErr)
 	}

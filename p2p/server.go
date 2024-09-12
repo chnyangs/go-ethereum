@@ -44,6 +44,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/nat"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/spf13/viper"
 )
 
 const (
@@ -346,7 +347,18 @@ func (srv *Server) insertLogDynamic(tableName string, data map[string]interface{
 }
 func initFindNodeDB() (*sql.DB, error) {
 	// open the db
-	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	// Load the db path from the .env file
+	viper.SetConfigName("dbconfig") // The name of the config file without extension
+	viper.SetConfigType("yaml")     // The file type
+	viper.AddConfigPath("../")      // Path to look for the config file, relative to Folder B/C
+
+	// Read the configuration file
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	dbPath := viper.GetString("database.EXECUTION_DB_PATH")
+
+	nodeFinddb, nfErr := sql.Open("sqlite3", dbPath)
 	if nfErr != nil {
 		return nil, nfErr
 	}

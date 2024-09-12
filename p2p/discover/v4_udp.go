@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/discover/v4wire"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/netutil"
+	"github.com/spf13/viper"
 )
 
 // Errors
@@ -146,9 +147,16 @@ type reply struct {
 }
 
 func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
-	cfg = cfg.withDefaults()
-	closeCtx, cancel := context.WithCancel(context.Background())
-	nodeFinddb, nfErr := sql.Open("sqlite3", "/Users/xyan0559/.sqlite/execution_geth.db")
+	viper.SetConfigName("dbconfig") // The name of the config file without extension
+	viper.SetConfigType("yaml")     // The file type
+	viper.AddConfigPath("../")      // Path to look for the config file, relative to Folder B/C
+
+	// Read the configuration file
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, err
+	}
+	dbPath := viper.GetString("database.EXECUTION_DB_PATH")
+	nodeFinddb, nfErr := sql.Open("sqlite3", dbPath)
 	if nfErr != nil {
 		fmt.Println("Error opening database", nfErr)
 	}
@@ -191,6 +199,10 @@ func ListenV4(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 	if nfErr != nil {
 		fmt.Println("Error CREATE TRIGGER on nodedisc", nfErr)
 	}
+	// configure the database
+	cfg = cfg.withDefaults()
+	closeCtx, cancel := context.WithCancel(context.Background())
+
 	t := &UDPv4{
 		conn:            newMeteredConn(c),
 		priv:            cfg.PrivateKey,
