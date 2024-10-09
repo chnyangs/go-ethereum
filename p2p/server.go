@@ -1245,11 +1245,11 @@ func (srv *Server) runPeer(p *Peer) {
 	remoteRequested, err := p.run()
 	// INSERT TABLE //
 	data := map[string]interface{}{
-		"type":    "Disconnect Reason",                   // log type, used to categorize logs in different stages
-		"name":    p.rw.name,                             // agent name
-		"addr":    p.RemoteAddr().String(),               // remote address including ip and port
-		"message": "Peer Disconnected by Remote Request", // disconnect reason
-		"pid":     p.ID().String(),                       // peer id
+		"type":    "Disconnect Reason",     // log type, used to categorize logs in different stages
+		"name":    p.rw.name,               // agent name
+		"addr":    p.RemoteAddr().String(), // remote address including ip and port
+		"message": err.Error(),             // disconnect reason
+		"pid":     p.ID().String(),         // peer id
 	}
 	if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 		fmt.Printf("Failed to insert log Connection Failed: %s", nFErr)
