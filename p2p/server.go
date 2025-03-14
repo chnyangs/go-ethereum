@@ -361,18 +361,18 @@ func (srv *Server) RemovePeer(node *enode.Node) {
 			sub = srv.peerFeed.Subscribe(ch)
 			// INSERT TABLE //
 			data := map[string]interface{}{
-				"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
+				"type":    "Disconnect-RemovePeer",    // log type, used to categorize logs in different stages
 				"name":    "unknown",                  // agent name
 				"addr":    peer.RemoteAddr().String(), // remote address including ip and port
-				"message": "RemovePeer",               // disconnect reason
+				"message": DiscRequested.String(),     // disconnect reason
 				"pid":     peer.ID().String(),         // peer id
 			}
+
 			if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nfErr != nil {
 				fmt.Printf("Failed to insert log Connection Failed: %s", nfErr)
 			}
 			// INSERT TABLE //
 			peer.Disconnect(DiscRequested)
-
 		}
 	})
 	// Wait for the peer connection to end.
@@ -814,19 +814,34 @@ running:
 				}
 				activePeerGauge.Inc(1)
 				// INSERT TABLE //
-				data := map[string]interface{}{
-					"type":    "Connection Success",           // log type, used to categorize logs in different stages
-					"name":    p.Name(),                       // agent name
-					"addr":    p.RemoteAddr().String(),        // remote address including ip and port
-					"message": "Adding p2p peer Successfully", // connection success message
-					"pid":     p.ID().String(),                // peer id
-				}
-				if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nfErr != nil {
-					fmt.Printf("Failed to insert log - Connection Failed: %s", nfErr)
-				}
+				// data := map[string]interface{}{
+				// 	"type":    "Connection Success",           // log type, used to categorize logs in different stages
+				// 	"name":    p.Name(),                       // agent name
+				// 	"addr":    p.RemoteAddr().String(),        // remote address including ip and port
+				// 	"message": "Adding p2p peer Successfully", // connection success message
+				// 	"pid":     p.ID().String(),                // peer id
+				// }
+				// if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nfErr != nil {
+				// 	fmt.Printf("Failed to insert log - Connection Failed: %s", nfErr)
+				// }
 				// INSERT TABLE //
 			}
+			// else if err != nil
 			c.cont <- err
+			// INSERT TABLE //
+			// Error message contains the reasons: DiscTooManyPeers, DiscAlreadyConnected, DiscSelf
+			tempPeer := srv.launchPeer(c)
+			data := map[string]interface{}{
+				"type":    "Connection Failed",        // log type, used to categorize logs in different stages
+				"name":    tempPeer.Name(),            // agent name
+				"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
+				"message": err.Error(),                // connection failure message
+				"pid":     tempPeer.ID().String(),     // peer id
+			}
+			if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nfErr != nil {
+				fmt.Printf("Failed to insert log - Connection Failed: %s", nfErr)
+			}
+			// INSERT TABLE //
 
 		case pd := <-srv.delpeer:
 			// A peer disconnected.
@@ -950,11 +965,11 @@ func (srv *Server) listenLoop() {
 			srv.log.Debug("Rejected inbound connection", "addr", fd.RemoteAddr(), "err", err)
 			// INSERT TABLE //
 			data := map[string]interface{}{
-				"type":    "Disconnect Reason",           // log type, used to categorize logs in different stages
-				"name":    "unknown",                     // agent name
-				"addr":    fd.RemoteAddr().String(),      // remote address including ip and port
-				"message": "Rejected Inbound Connection", // disconnect reason
-				"pid":     "",                            // peer id
+				"type":    "Disconnect Reason:InboundConn", // log type, used to categorize logs in different stages
+				"name":    "unknown",                       // agent name
+				"addr":    fd.RemoteAddr().String(),        // remote address including ip and port
+				"message": "Rejected Inbound Connection",   // disconnect reason
+				"pid":     "",                              // peer id
 			}
 			if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 				fmt.Printf("Failed to insert log: Rejected Inbound Connection: %s", nFErr)
@@ -1045,7 +1060,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 			srv.log.Trace("Setting up connection failed", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err, c.node.ID(), c.node.IP())
 			// INSERT TABLE //
 			data := map[string]interface{}{
-				"type":    "Disconnect Reason",                                    // log type, used to categorize logs in different stages
+				"type":    "Disconnect Reason-SetupConn",                          // log type, used to categorize logs in different stages
 				"name":    "unknown",                                              // agent name
 				"addr":    c.fd.RemoteAddr().String(),                             // remote address including ip and port
 				"message": "dial destination doesn't have a secp256k1 public key", // disconnect reason
@@ -1065,11 +1080,11 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		srv.log.Trace("Failed RLPx handshake", "addr", c.fd.RemoteAddr(), "conn", c.flags, "err", err)
 		// INSERT TABLE //
 		data := map[string]interface{}{
-			"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
-			"name":    "unknown",                  // agent name
-			"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
-			"message": "Failed RLPx handshake",    // disconnect reason
-			"pid":     "",                         // peer id if exists
+			"type":    "Disconnect Reason-Failed RLPx handshake", // log type, used to categorize logs in different stages
+			"name":    "unknown",                                 // agent name
+			"addr":    c.fd.RemoteAddr().String(),                // remote address including ip and port
+			"message": err.Error(),                               // disconnect reason
+			"pid":     "",                                        // peer id if exists
 		}
 		if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 			fmt.Printf("Failed to insert log: RLPx Handshake Failed: %s", nFErr)
@@ -1084,16 +1099,16 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		c.node = nodeFromConn(remotePubkey, c.fd)
 	}
 	// INSERT TABLE //
-	data := map[string]interface{}{
-		"type":    "RLPX Handshake Success",   // log type, used to categorize logs in different stages
-		"name":    "unknown",                  // agent name
-		"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
-		"message": "RLPX Handshake Success",   // handshake success message
-		"pid":     c.node.ID().String(),       // peer id
-	}
-	if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
-		fmt.Println("Failed to insert log: RLPx Handshake Success\n", "err", nFErr)
-	}
+	// data := map[string]interface{}{
+	// 	"type":    "RLPX Handshake Success-SetupConn", // log type, used to categorize logs in different stages
+	// 	"name":    "unknown",                          // agent name
+	// 	"addr":    c.fd.RemoteAddr().String(),         // remote address including ip and port
+	// 	"message": "RLPX Handshake Success",           // handshake success message
+	// 	"pid":     c.node.ID().String(),               // peer id
+	// }
+	// if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
+	// 	fmt.Println("Failed to insert log: RLPx Handshake Success\n", "err", nFErr)
+	// }
 	// INSERT TABLE //
 	clog := srv.log.New("id", c.node.ID(), "addr", c.fd.RemoteAddr(), "conn", c.flags)
 	// show the node name in the console
@@ -1103,7 +1118,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
 		data := map[string]interface{}{
-			"type":    "Disconnect Reason",                                              // log type, used to categorize logs in different stages
+			"type":    "Disconnect Reason-SetupConn",                                    // log type, used to categorize logs in different stages
 			"name":    "unknown",                                                        // agent name
 			"addr":    c.fd.RemoteAddr().String(),                                       // remote address including ip and port
 			"message": "After RLPX handshake, Rejected Peer at CheckPointPostHandshake", // disconnect reason
@@ -1117,17 +1132,17 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 	}
 	srv.log.Trace("Accepted peer", "addr", c.fd.RemoteAddr().String())
 	// INSERT TABLE //
-	data = map[string]interface{}{
-		"type":    "Accepted Peer",                                   // log type, used to categorize logs in different stages
-		"name":    "unknown",                                         // agent name
-		"addr":    c.fd.RemoteAddr().String(),                        // remote address including ip and port
-		"message": "Accepted peer, pass the CheckPointPostHandshake", // connection success message
-		"pid":     tempNodeId,                                        // peer id
-	}
-	if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
-		// if nFErr != nil {
-		fmt.Printf("Failed to insert log: Accepted Peer: %s", nFErr)
-	}
+	// data = map[string]interface{}{
+	// 	"type":    "Accepted Peer-SetupConn",                         // log type, used to categorize logs in different stages
+	// 	"name":    "unknown",                                         // agent name
+	// 	"addr":    c.fd.RemoteAddr().String(),                        // remote address including ip and port
+	// 	"message": "Accepted peer, pass the CheckPointPostHandshake", // connection success message
+	// 	"pid":     tempNodeId,                                        // peer id
+	// }
+	// if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
+	// 	// if nFErr != nil {
+	// 	fmt.Printf("Failed to insert log: Accepted Peer: %s", nFErr)
+	// }
 	// INSERT TABLE //
 	// Run the capability negotiation handshake.
 	phs, err := c.doProtoHandshake(srv.ourHandshake)
@@ -1135,11 +1150,11 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Failed p2p handshake", "err", err)
 		// INSERT TABLE //
 		data := map[string]interface{}{
-			"type":    "Disconnect Reason",        // log type, used to categorize logs in different stages
-			"name":    "unknown",                  // agent name
-			"addr":    c.fd.RemoteAddr().String(), // remote address including ip and port
-			"message": "Failed p2p handshake",     // disconnect reason
-			"pid":     c.node.ID().String(),       // peer id
+			"type":    "Failed p2p handshake-SetupConn", // log type, used to categorize logs in different stages
+			"name":    "unknown",                        // agent name
+			"addr":    c.fd.RemoteAddr().String(),       // remote address including ip and port
+			"message": err.Error(),                      // Failed P2P Handshake reason
+			"pid":     c.node.ID().String(),             // peer id
 		}
 		if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 			fmt.Printf("Failed to insert log: Server]Failed p2p handshake: %s", nFErr)
@@ -1152,11 +1167,11 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Wrong devp2p handshake identity", "phsid", hex.EncodeToString(phs.ID))
 		// INSERT TABLE //
 		data := map[string]interface{}{
-			"type":    "Disconnect Reason",                                              // log type, used to categorize logs in different stages
-			"name":    "unknown",                                                        // agent name
-			"addr":    c.fd.RemoteAddr().String(),                                       // remote address including ip and port
-			"message": "After ProtoHandshake, detected Wrong devp2p handshake identity", // disconnect reason
-			"pid":     id.String(),                                                      // peer id
+			"type":    "Disconnect Reason-SetupConn",   // log type, used to categorize logs in different stages
+			"name":    "unknown",                       // agent name
+			"addr":    c.fd.RemoteAddr().String(),      // remote address including ip and port
+			"message": DiscUnexpectedIdentity.String(), // disconnect reason
+			"pid":     id.String(),                     // peer id
 		}
 		if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 			fmt.Printf("Failed to insert log: Wrong devp2p handshake identity: %s", nFErr)
@@ -1181,7 +1196,7 @@ func (srv *Server) setupConn(c *conn, dialDest *enode.Node) error {
 		clog.Trace("Rejected peer", "err", err)
 		// INSERT TABLE //
 		data := map[string]interface{}{
-			"type":    "Disconnect Reason",                                       // log type, used to categorize logs in different stages
+			"type":    "Disconnect Reason:PeerCheck",                             // log type, used to categorize logs in different stages
 			"name":    "unknown",                                                 // agent name
 			"addr":    c.fd.RemoteAddr().String(),                                // remote address including ip and port
 			"message": "After P2P Handshake, Rejected peer at CheckPointAddPeer", // disconnect reason
@@ -1245,11 +1260,11 @@ func (srv *Server) runPeer(p *Peer) {
 	remoteRequested, err := p.run()
 	// INSERT TABLE //
 	data := map[string]interface{}{
-		"type":    "Disconnect Reason",     // log type, used to categorize logs in different stages
-		"name":    p.rw.name,               // agent name
-		"addr":    p.RemoteAddr().String(), // remote address including ip and port
-		"message": err.Error(),             // disconnect reason
-		"pid":     p.ID().String(),         // peer id
+		"type":    "Disconnect Reason:RemoteRequested", // log type, used to categorize logs in different stages
+		"name":    p.rw.name,                           // agent name
+		"addr":    p.RemoteAddr().String(),             // remote address including ip and port
+		"message": err.Error(),                         // disconnect reason
+		"pid":     p.ID().String(),                     // peer id
 	}
 	if nFErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nFErr != nil {
 		fmt.Printf("Failed to insert log Connection Failed: %s", nFErr)

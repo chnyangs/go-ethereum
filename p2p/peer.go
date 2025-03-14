@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/nf"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -290,6 +291,19 @@ loop:
 
 	close(p.closed)
 	p.rw.close(reason)
+	// INSERT TABLE //
+	// This reason may: DiscUselessPeer, DiscNetworkError; DiscProtocolError and DiscSubprotocolError
+	data := map[string]interface{}{
+		"type":    "Disconnect-loop",       // log type, used to categorize logs in different stages
+		"name":    "unknown",               // agent name
+		"addr":    p.RemoteAddr().String(), // remote address including ip and port
+		"message": reason.String(),         // disconnect reason
+		"pid":     p.ID().String(),         // peer id
+	}
+	// INSERT TABLE //
+	if nfErr := nf.InsertLogDynamic(nf.Db, nf.TbP2PServer, data); nfErr != nil {
+		fmt.Printf("Failed to insert log Connection Failed: %s", nfErr)
+	}
 	p.wg.Wait()
 	return remoteRequested, err
 	// Change to return remoteRequested, reason from the original code
